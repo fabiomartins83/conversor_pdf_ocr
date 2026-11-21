@@ -1,7 +1,3 @@
-# -*- coding: utf-8 -*-
-# !apt-get update -qq && apt-get install -y -qq tesseract-ocr tesseract-ocr-por ghostscript
-# !pip install -q mammoth xhtml2pdf pdfplumber pypdf ocrmypdf img2pdf "pillow>=12.2.0,<13.0"
-
 from io import BytesIO
 from pathlib import Path
 import subprocess
