@@ -1,4 +1,4 @@
-name: CI - Validar Projeto PDF OCR
+name: CI - Validar Projeto Python
 
 on:
   push:
@@ -19,10 +19,10 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: 3. Instalar dependências de sistema (Tesseract e Ghostscript)
+      - name: 3. Instalar Tesseract e Ghostscript (sudo apt-get)
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-por ghostscript
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-por ghostscript
 
       - name: 4. Configurar Cache do Pip
         uses: actions/cache@v4
