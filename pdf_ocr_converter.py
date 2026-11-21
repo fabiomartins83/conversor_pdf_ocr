@@ -24,6 +24,8 @@ EXT_IMAGENS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 EXT_WORD = {".docx", ".doc"}
 SUFIXO_COM_TEXTO, SUFIXO_SEM_TEXTO, SUFIXO_WORD = "_ocr", "_scan", "_docx"
 _TIPOS_EMF_WMF = {"image/x-emf", "image/x-wmf", "image/emf", "image/wmf"}
+_RE_IMG_SEM_SRC = re.compile(r'<img\b(?![^>]*\bsrc\s*=\s*["\'][^"\']+["\'])[^>]*?/?>', re.IGNORECASE)
+_RE_DATA_ISO = re.compile(r"\d{4}-\d{2}-\d{2}")
 _CSS_WORD = (
     "@page { size: A4; margin: 2cm; } body { font-family: Helvetica; font-size: 11pt; line-height: 1.3; } "
     "h1 { font-size: 18pt; } h2 { font-size: 15pt; } h3 { font-size: 13pt; } "
@@ -32,15 +34,12 @@ _CSS_WORD = (
 
 
 def _remover_imgs_sem_src(html: str) -> str:
-  return re.sub(r'<img\b(?![^>]*\bsrc\s*=\s*["\'][^"\']+["\'])[^>]*?/?>', "", html, flags=re.IGNORECASE)
+  return _RE_IMG_SEM_SRC.sub("", html)
 
 
 class _FiltroAvisosPisa(logging.Filter):
-  _IGNORADOS = ("Ignoring CSS properties xhtml2pdf does not implement",)
-
   def filter(self, record: logging.LogRecord) -> bool:
-    msg = record.getMessage()
-    return not any(trecho in msg for trecho in self._IGNORADOS)
+    return "Ignoring CSS properties xhtml2pdf does not implement" not in record.getMessage()
 
 
 def _executar_pisa_sem_aviso_css(html: str, dest: BytesIO):
@@ -67,9 +66,7 @@ def existe_arquivo(arq) -> bool:
 
 
 def _resolver_destino(alvo: Path) -> Path:
-  if not existe_arquivo(alvo):
-    return alvo
-  if _perguntar_sn(f" O arquivo {alvo.name} já existe no ambiente. Você deseja sobrescrever o arquivo (s/n)? ") == "s":
+  if not existe_arquivo(alvo) or _perguntar_sn(f" O arquivo {alvo.name} já existe no ambiente. Você deseja sobrescrever o arquivo (s/n)? ") == "s":
     return alvo
   n = 1
   while (cand := alvo.with_name(f"{alvo.stem}_v{n}.pdf")).exists():
@@ -104,40 +101,26 @@ def _rodar_cli_bytes(comandos: list[list[str]], entrada: bytes, validar_png: boo
 
 
 def _extrair_tabelas_pdf_sample(src, max_linhas: int = 10, min_linhas: int = 2) -> list[list[list[str]]]:
-  """Detecta tabelas com find_tables() e extrai sample de até max_linhas apenas quando houver tabelas."""
-  tabelas_sample: list[list[list[str]]] = []
+  tabelas: list[list[list[str]]] = []
   try:
     with pdfplumber.open(src) as pdf:
       for page in pdf.pages:
-        if not page.find_tables():
-          continue
-        for raw_tabela in page.extract_tables():
-          linhas = [
-              [" ".join((c or "").split()) for c in linha]
-              for linha in (raw_tabela or [])
-              if any((c or "").strip() for c in (linha or []))
-          ]
+        for t in page.find_tables():
+          linhas = [[" ".join((c or "").split()) for c in r] for r in (t.extract() or []) if any((c or "").strip() for c in (r or []))]
           if len(linhas) >= min_linhas:
-            tabelas_sample.append(linhas[:max_linhas])
+            tabelas.append(linhas[:max_linhas])
   except (OSError, ValueError, RuntimeError):
     return []
-  return tabelas_sample
+  return tabelas
 
 
 def _formatar_linha_tabela(linha: list[str]) -> str:
-  itens = []
-  for col in linha:
-    if col.isdigit() or re.fullmatch(r"\d{4}-\d{2}-\d{2}", col):
-      itens.append(col)
-    else:
-      itens.append(f'"{col.replace(chr(34), chr(92) + chr(34))}"')
-  return f"[{', '.join(itens)}]"
+  return f"[{', '.join(c if c.isdigit() or _RE_DATA_ISO.fullmatch(c) else chr(34) + c.replace(chr(34), chr(92) + chr(34)) + chr(34) for c in linha)}]"
 
 
 def _imprimir_tabelas_sample(tabelas: list[list[list[str]]]) -> None:
   for idx, tabela in enumerate(tabelas, 1):
-    linhas_fmt = ", ".join(_formatar_linha_tabela(l) for l in tabela[:10])
-    print(f" Tabela {idx}: [{linhas_fmt}, END_OF_TABLE]")
+    print(f" Tabela {idx}: [{', '.join(_formatar_linha_tabela(l) for l in tabela[:10])}, END_OF_TABLE]")
 
 
 def _analisar_pdf(src, min_chars: int = MIN_CHARS, extrair_texto: bool = True) -> tuple[int, list[dict], str]:
@@ -166,8 +149,10 @@ def _chars_pdf(src, min_chars: int = MIN_CHARS) -> tuple[int, list[dict]]:
 
 def _converter_imagem_cli_para_png_memoria(dados_img: bytes, ext: str) -> bytes | None:
   fmt = ext.lstrip(".").lower()
-  cmds = ([["magick", f"{fmt}:-", "png:-"], ["convert", f"{fmt}:-", "png:-"]] if fmt else [])
-  cmds += [["magick", "-", "png:-"], ["convert", "-", "png:-"], ["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "image2pipe", "-vcodec", "png", "pipe:1"]]
+  cmds = ([["magick", f"{fmt}:-", "png:-"], ["convert", f"{fmt}:-", "png:-"]] if fmt else []) + [
+      ["magick", "-", "png:-"], ["convert", "-", "png:-"],
+      ["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+  ]
   return _rodar_cli_bytes(cmds, dados_img, validar_png=True)
 
 
@@ -186,10 +171,9 @@ def _imagem_para_pdf_bytes(img: Path, dpi: int = 300) -> tuple[bytes | None, str
         ImageOps.exif_transpose(im).convert("RGB").save(buf, format="JPEG", quality=95, dpi=(dpi, dpi))
       return img2pdf.convert(buf.getvalue()), None
     except (OSError, ValueError, RuntimeError, ImageOpenError, UnidentifiedImageError) as e2:
-      png_bytes = _converter_imagem_cli_para_png_memoria(img.read_bytes(), img.suffix)
-      if png_bytes:
+      if png := _converter_imagem_cli_para_png_memoria(img.read_bytes(), img.suffix):
         try:
-          return img2pdf.convert(png_bytes), None
+          return img2pdf.convert(png), None
         except (OSError, ValueError, RuntimeError, ImageOpenError) as e3:
           return None, f"falha_pos_cli ({type(e3).__name__}: {e3})"
       return None, f"{type(e1).__name__}: {e1} | {type(e2).__name__}: {e2}"
@@ -241,13 +225,9 @@ def _pdf_sem_ocr_bytes(pdf: Path) -> bytes:
 
 
 def _preparar_pdf(pdf: Path, alvo: Path, idioma: str, min_chars: int) -> tuple[dict, bytes | None, Path | None]:
-  try:
-    reader = PdfReader(pdf)
-    _ = len(reader.pages)
-  except (PdfReadError, OSError, ValueError, RuntimeError) as e:
-    return {"tipo": "pdf_invalido_ou_corrompido", "acao": f"arquivo PDF truncado ou corrompido ({type(e).__name__}); nada salvo", "com_txt": 0, "info_ocr": None, "paginas": [], "conteudo_texto": ""}, None, None
-
-  _, pags, conteudo_texto = _analisar_pdf(reader, min_chars)
+  _, pags, conteudo_texto = _analisar_pdf(pdf, min_chars)
+  if not pags:
+    return {"tipo": "pdf_invalido_ou_corrompido", "acao": "arquivo PDF truncado ou corrompido; nada salvo", "com_txt": 0, "info_ocr": None, "paginas": [], "conteudo_texto": ""}, None, None
   uteis = [p for p in pags if p["status"] != "em_branco"]
   tot, com = len(uteis), sum(p["status"] == "texto_selecionavel" for p in uteis)
   esc = sum(p["status"] == "escaneado_ou_imagem" for p in uteis)
@@ -257,16 +237,14 @@ def _preparar_pdf(pdf: Path, alvo: Path, idioma: str, min_chars: int) -> tuple[d
   elif tot and (esc == tot or (com and esc)):
     tipo = "escaneado" if esc == tot else "misto"
     i, dados_ocr, _ = _preparar_ocr_em_pdf_existente(pdf, alvo, idioma, min_chars, com)
-    if i and i.get("conteudo_texto"):
-      conteudo_texto = i["conteudo_texto"]
+    conteudo_texto = i.get("conteudo_texto") or conteudo_texto
     if dados_ocr is not None:
       i["_dados_sem_texto"], i["_alvo_sem_texto"] = lambda p=pdf: _pdf_sem_ocr_bytes(p), alvo.with_name(f"{pdf.stem}{SUFIXO_SEM_TEXTO}.pdf")
       dados, dest, acao = dados_ocr, alvo, "texto reconhecido; salvo como PDF com texto selecionável"
     elif i.get("falhou"):
       acao = "falha no OCR; nada salvo (veja detalhe_ocr)"
     else:
-      tipo = "escaneado_sem_texto" if tipo == "escaneado" else tipo
-      acao = "nenhum texto reconhecido por OCR; nada salvo"
+      tipo, acao = ("escaneado_sem_texto" if tipo == "escaneado" else tipo), "nenhum texto reconhecido por OCR; nada salvo"
   else:
     tipo, acao = "indefinido_ou_vazio", "inspecionar manualmente ou aplicar OCR/VLM; nada salvo"
   return {"tipo": tipo, "acao": acao, "com_txt": com, "info_ocr": i, "paginas": pags, "conteudo_texto": conteudo_texto}, dados, dest
@@ -277,31 +255,23 @@ def _pdf_bytes_para_pdf_imagem_bytes(pdf_bytes: bytes, dpi: int = 150) -> bytes 
     total = len(PdfReader(BytesIO(pdf_bytes)).pages)
     if not total:
       return None
-    paginas_jpg = []
-    for p in range(1, total + 1):
-      jpg = _rodar_cli_bytes([["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=jpeg", "-dJPEGQ=92", f"-r{dpi}", f"-dFirstPage={p}", f"-dLastPage={p}", "-sOutputFile=-", "-"]], pdf_bytes)
-      if not jpg:
-        return None
-      paginas_jpg.append(jpg)
-    return img2pdf.convert(paginas_jpg)
+    paginas_jpg = [_rodar_cli_bytes([["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=jpeg", "-dJPEGQ=92", f"-r{dpi}", f"-dFirstPage={p}", f"-dLastPage={p}", "-sOutputFile=-", "-"]], pdf_bytes) for p in range(1, total + 1)]
+    return img2pdf.convert(paginas_jpg) if all(paginas_jpg) else None
   except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
     return None
 
 
 def _converter_emf_para_png_memoria(dados_emf: bytes) -> bytes | None:
-  cmds = [["magick", "emf:-", "png:-"], ["convert", "emf:-", "png:-"], ["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=png16m", "-r150", "-sOutputFile=-", "-"]]
-  return _rodar_cli_bytes(cmds, dados_emf, validar_png=True)
+  return _rodar_cli_bytes([["magick", "emf:-", "png:-"], ["convert", "emf:-", "png:-"], ["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=png16m", "-r150", "-sOutputFile=-", "-"]], dados_emf, validar_png=True)
 
 
 def _tratar_imagem_word(image):
   with image.open() as stream:
-    raw = stream.read()
-  content_type = image.content_type
+    raw, content_type = stream.read(), image.content_type
   if content_type in _TIPOS_EMF_WMF:
-    png_bytes = _converter_emf_para_png_memoria(raw)
-    if not png_bytes:
+    if not (png := _converter_emf_para_png_memoria(raw)):
       return []
-    raw, content_type = png_bytes, "image/png"
+    raw, content_type = png, "image/png"
   return {"src": f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"}
 
 
@@ -328,14 +298,11 @@ def _classificar_arquivo(caminho, idioma_ocr="por", min_chars=MIN_CHARS) -> tupl
   arq, ext = Path(caminho), Path(caminho).suffix.lower()
   if ext in EXT_IMAGENS:
     i, dados, alvo = _preparar_imagem_para_pdf(arq, arq.with_name(f"{arq.stem}{SUFIXO_COM_TEXTO}.pdf"), arq.with_name(f"{arq.stem}{SUFIXO_SEM_TEXTO}.pdf"), idioma_ocr, min_chars)
-    tipo, acao = ("imagem_falha_conversao", "falha na conversão ou no OCR; nada salvo (veja detalhe_ocr)") if i.get("falhou") else (
-        ("imagem_com_texto", "salvo como PDF com texto selecionável") if i["tem_texto"] else ("imagem_sem_texto", "salvo como PDF escaneado sem texto selecionável"))
+    tipo, acao = ("imagem_falha_conversao", "falha na conversão ou no OCR; nada salvo (veja detalhe_ocr)") if i.get("falhou") else (("imagem_com_texto", "salvo como PDF com texto selecionável") if i["tem_texto"] else ("imagem_sem_texto", "salvo como PDF escaneado sem texto selecionável"))
     return {"arquivo": arq.name, "tipo": tipo, "selecionavel": False, "texto_convertivel": i["tem_texto"], "chars_ocr": i["chars"], "pdf_gerado": str(alvo) if alvo else None, "detalhe_ocr": i["motivo"], "acao_sugerida": acao, "conteudo_texto": i.get("conteudo_texto", ""), "_info": i}, dados, alvo
   if ext in EXT_WORD:
     i, dados, alvo = _preparar_word_para_pdf(arq, arq.with_name(f"{arq.stem}{SUFIXO_WORD}.pdf"), min_chars)
-    acao = ("convertido e salvo como PDF com texto selecionável" if dados and i["tem_texto"] else (
-        "PDF salvo, mas sem texto selecionável (documento só com imagens?)" if dados else (
-            "formato .doc não suportado; salve como .docx no Word e tente de novo; nada salvo" if i["motivo"] == "formato_doc_nao_suportado" else f"nada salvo ({i['motivo']})")))
+    acao = "convertido e salvo como PDF com texto selecionável" if dados and i["tem_texto"] else ("PDF salvo, mas sem texto selecionável (documento só com imagens?)" if dados else ("formato .doc não suportado; salve como .docx no Word e tente de novo; nada salvo" if i["motivo"] == "formato_doc_nao_suportado" else f"nada salvo ({i['motivo']})"))
     return {"arquivo": arq.name, "tipo": "word_docx" if ext == ".docx" else "word_doc", "selecionavel": i["tem_texto"], "texto_convertivel": i["tem_texto"], "chars_ocr": 0, "chars_texto": i["chars"], "pdf_gerado": str(alvo) if alvo else None, "detalhe_ocr": None, "detalhe_conversao": i["motivo"], "acao_sugerida": acao, "conteudo_texto": i.get("conteudo_texto", ""), "_info": i}, dados, alvo
   if ext != ".pdf":
     return {"arquivo": arq.name, "tipo": "outro", "selecionavel": False, "texto_convertivel": False, "acao_sugerida": "verificar formato", "conteudo_texto": ""}, None, None
@@ -370,49 +337,33 @@ def processar_arquivo(caminho, idioma_ocr=IDIOMA_OCR, min_chars=MIN_CHARS) -> di
   if not existe_arquivo(arq):
     print(f"O {arq.name} não existe. Verifique o nome do arquivo.")
     return {"arquivo": arq.name, "tipo": "inexistente", "selecionavel": False, "texto_convertivel": False, "acao_sugerida": "verificar nome do arquivo"}
-
   classificacao, dados, alvo = _classificar_arquivo(caminho, idioma_ocr, min_chars)
-  conteudo_texto = classificacao.pop("conteudo_texto", "")
-  info_aux = classificacao.pop("_info", None) or {}
+  conteudo_texto, info_aux = classificacao.pop("conteudo_texto", ""), classificacao.pop("_info", None) or {}
   print(f" Arquivo: {caminho} \n Detecção: {classificacao}")
-  if conteudo_texto and (primeiro_paragrafo := next((limpo for p in conteudo_texto.split("\n\n") if (limpo := " ".join(p.split()))), "")):
-    print(f' Trecho: "{primeiro_paragrafo}"')
-
+  if conteudo_texto and (trecho := next((limpo for p in conteudo_texto.split("\n\n") if (limpo := " ".join(p.split()))), "")):
+    print(f' Trecho: "{trecho}"')
   fonte_pdf = BytesIO(dados) if isinstance(dados, (bytes, bytearray)) else (arq if arq.suffix.lower() == ".pdf" and classificacao.get("tipo") != "pdf_invalido_ou_corrompido" else None)
-  if fonte_pdf is not None:
-    tabelas = _extrair_tabelas_pdf_sample(fonte_pdf)
-    if tabelas:
-      classificacao["tabelas"] = tabelas
-      _imprimir_tabelas_sample(tabelas)
-
+  if fonte_pdf is not None and (tabelas := _extrair_tabelas_pdf_sample(fonte_pdf)):
+    classificacao["tabelas"] = tabelas
+    _imprimir_tabelas_sample(tabelas)
   if dados is None or alvo is None:
     return _confirmar_e_salvar(classificacao, None, None, confirmar=False)
-
   if classificacao.get("tipo") in ("imagem_com_texto", "escaneado", "misto") or classificacao.get("texto_convertivel"):
     if _perguntar_sn(f" Há texto no conteúdo do arquivo {arq.name}. Você deseja converter o arquivo para PDF com texto selecionável? (s/n) ") == "s":
-      if arq.suffix.lower() in EXT_WORD and alvo is not None:
-        alvo = alvo.with_name(f"{arq.stem}{SUFIXO_WORD}.pdf")
+      alvo = alvo.with_name(f"{arq.stem}{SUFIXO_WORD}.pdf") if arq.suffix.lower() in EXT_WORD else alvo
       classificacao["acao_sugerida"] = "texto reconhecido; salvo como PDF com texto selecionável"
     elif "_dados_sem_texto" in info_aux:
       alt = info_aux["_dados_sem_texto"]
       dados, alvo = alt() if callable(alt) else alt, info_aux["_alvo_sem_texto"]
-      classificacao["texto_convertivel"] = False
-      classificacao["acao_sugerida"] = "salvo como PDF escaneado sem texto selecionável"
+      classificacao.update({"texto_convertivel": False, "acao_sugerida": "salvo como PDF escaneado sem texto selecionável"})
       if arq.suffix.lower() in EXT_IMAGENS:
         classificacao["tipo"] = "imagem_sem_texto"
-
-  if _perguntar_sn(f" Deseja salvar {alvo.name}? (s/n) ") == "n":
-    return _confirmar_e_salvar(classificacao, None, None, confirmar=False)
-
-  return _confirmar_e_salvar(classificacao, dados, alvo, confirmar=False)
+  return _confirmar_e_salvar(classificacao, None if _perguntar_sn(f" Deseja salvar {alvo.name}? (s/n) ") == "n" else dados, alvo, confirmar=False)
 
 
 if __name__ == "__main__":
   print("Conversor de imagem para PDF com reconhecimento de texto")
   print("Com esta ferramenta, é possível converter automaticamente documentos escaneados, fotografias e ilustrações para arquivos PDF. ")
-  while True:
-    arquivo = input("\nDigite o nome do arquivo: ").strip()
-    if arquivo.lower() == "sair":
-      print("Até logo!")
-      break
+  while (arquivo := input("\nDigite o nome do arquivo: ").strip()).lower() != "sair":
     processar_arquivo(arquivo)
+  print("Até logo!")
