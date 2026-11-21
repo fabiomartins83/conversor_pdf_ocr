@@ -1,6 +1,6 @@
 img2pdf
 mammoth
 ocrmypdf
-pillow>=12.2.0,<13.0
+pillow
 pypdf
 xhtml2pdf
