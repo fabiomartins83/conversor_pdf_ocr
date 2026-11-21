@@ -1,19 +1,18 @@
-# -*- coding: utf-8 -*-
 # !apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-por ghostscript
 # !pip install mammoth xhtml2pdf pdfplumber pypdf ocrmypdf img2pdf pillow
 
 
 import base64
-from io import BytesIO
 import logging
-from pathlib import Path
 import re
 import subprocess
+from io import BytesIO
+from pathlib import Path
 
 import img2pdf
-from img2pdf import ImageOpenError
 import mammoth
 import ocrmypdf
+from img2pdf import ImageOpenError
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PdfReadError
