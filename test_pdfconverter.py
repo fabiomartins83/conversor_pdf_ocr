@@ -113,14 +113,16 @@ def test_imagem_para_pdf_valida_e_invalida(tmp_path: Path, monkeypatch):
   assert "UnidentifiedImageError" in (err_msg or "")
 
 
-def test_tabelas_pdfplumber_e_formatacao():
+def test_tabelas_pdfplumber_e_formatacao(capsys):
   tabela_falsa = [
       ["id", "nome_cliente", "data"],
       ["1", "Fabio", "2026-11-21"],
   ]
+  fake_tabela = MagicMock()
+  fake_tabela.extract.return_value = tabela_falsa
+
   fake_page = MagicMock()
-  fake_page.find_tables.return_value = [object()]
-  fake_page.extract_tables.return_value = [tabela_falsa]
+  fake_page.find_tables.return_value = [fake_tabela]
 
   fake_pdf = MagicMock()
   fake_pdf.pages = [fake_page]
@@ -135,6 +137,10 @@ def test_tabelas_pdfplumber_e_formatacao():
   assert amostras[0][0] == ["id", "nome_cliente", "data"]
   linha_fmt = mod._formatar_linha_tabela(amostras[0][1])
   assert linha_fmt == '[1, "Fabio", 2026-11-21]'
+
+  mod._imprimir_tabelas_sample(amostras)
+  out = capsys.readouterr().out
+  assert 'Tabela 1: [["id", "nome_cliente", "data"], [1, "Fabio", 2026-11-21], END_OF_TABLE]' in out
 
 
 def test_word_e_emf_fallback(tmp_path: Path, monkeypatch):
