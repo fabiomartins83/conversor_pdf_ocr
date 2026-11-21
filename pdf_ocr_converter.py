@@ -1,7 +1,10 @@
+import subprocess
 from io import BytesIO
 from pathlib import Path
-import subprocess
-import img2pdf, mammoth, ocrmypdf
+
+import img2pdf
+import mammoth
+import ocrmypdf
 from PIL import Image, ImageOps
 from pypdf import PdfReader, PdfWriter
 from xhtml2pdf import pisa
@@ -72,21 +75,22 @@ def _chars_pdf(src, min_chars: int = MIN_CHARS) -> tuple[int, list[dict]]:
   return _analisar_pdf(src, min_chars, extrair_texto=False)[:2]
 
 
-def _imagem_para_pdf_bytes(img: Path) -> tuple[bytes | None, str | None]:
+def _imagem_para_pdf_bytes(img: Path, dpi: int = 300) -> tuple[bytes | None, str | None]:
   if not existe_arquivo(img):
     return None, f"arquivo_nao_encontrado ({img.resolve()})"
   try:
     return img2pdf.convert(str(img)), None
-  except Exception as e1:
+  except (OSError, ValueError, RuntimeError) as e1:
     try:
       Image.MAX_IMAGE_PIXELS = None
+      buf = BytesIO()
       with Image.open(img) as im:
-        dpi, buf = im.info.get("dpi", (300, 300)), BytesIO()
-        ImageOps.exif_transpose(im).convert("RGB").save(buf, format="JPEG", quality=95, dpi=dpi)
+        ImageOps.exif_transpose(im).convert("RGB").save(
+            buf, format="JPEG", quality=95, dpi=(dpi, dpi)
+        )
       return img2pdf.convert(buf.getvalue()), None
-    except Exception as e2:
+    except (OSError, ValueError, RuntimeError) as e2:
       return None, f"{type(e1).__name__}: {e1} | {type(e2).__name__}: {e2}"
-
 
 def _aplicar_ocr(entrada, idioma: str, min_chars: int, preservar_paginas_com_texto: bool = False) -> dict:
   try:
@@ -96,9 +100,28 @@ def _aplicar_ocr(entrada, idioma: str, min_chars: int, preservar_paginas_com_tex
     chars, pags, texto = _analisar_pdf(BytesIO(dados), min_chars)
     ok = chars >= min_chars
     return {"tem_texto": ok, "chars": chars, "dados": dados, "conteudo_texto": texto, "paginas_com_texto": sum(p["status"] == "texto_selecionavel" for p in pags), "motivo": "texto_detectado_via_ocrmypdf" if ok else "pouco_ou_nenhum_texto_detectado"}
-  except Exception as e:
-    motivo = f"dependencia_sistema_ausente ({e})" if isinstance(e, ocrmypdf.exceptions.MissingDependencyError) else f"falha_ou_sem_texto_ocr ({type(e).__name__}: {e})"
-    return {"tem_texto": False, "chars": 0, "paginas_com_texto": 0, "dados": None, "conteudo_texto": "", "motivo": motivo, "falhou": True}
+  except ocrmypdf.exceptions.MissingDependencyError as e:
+    motivo = f"dependencia_sistema_ausente ({e})"
+    return {
+        "tem_texto": False,
+        "chars": 0,
+        "paginas_com_texto": 0,
+        "dados": None,
+        "conteudo_texto": "",
+        "motivo": motivo,
+        "falhou": True,
+    }
+  except (OSError, ValueError, RuntimeError, ocrmypdf.exceptions.OcrmypdfError) as e:
+    motivo = f"falha_ou_sem_texto_ocr ({type(e).__name__}: {e})"
+    return {
+        "tem_texto": False,
+        "chars": 0,
+        "paginas_com_texto": 0,
+        "dados": None,
+        "conteudo_texto": "",
+        "motivo": motivo,
+        "falhou": True,
+    }
 
 
 def _preparar_imagem_para_pdf(img: Path, destino_com_texto: Path, destino_sem_texto: Path, idioma: str, min_chars: int) -> tuple[dict, bytes | None, Path | None]:
@@ -165,17 +188,44 @@ def _pdf_bytes_para_pdf_imagem_bytes(pdf_bytes: bytes, dpi: int = 150) -> bytes 
       return None
     paginas_jpg = []
     for p in range(1, total + 1):
-      res = subprocess.run(["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=jpeg", "-dJPEGQ=92", f"-r{dpi}", f"-dFirstPage={p}", f"-dLastPage={p}", "-sOutputFile=-", "-"], input=pdf_bytes, capture_output=True)
+      res = subprocess.run(
+          [
+              "gs",
+              "-q",
+              "-dSAFER",
+              "-dBATCH",
+              "-dNOPAUSE",
+              "-sDEVICE=jpeg",
+              "-dJPEGQ=92",
+              f"-r{dpi}",
+              f"-dFirstPage={p}",
+              f"-dLastPage={p}",
+              "-sOutputFile=-",
+              "-",
+          ],
+          input=pdf_bytes,
+          capture_output=True,
+          check=False,
+      )
       if res.returncode != 0 or not res.stdout:
         return None
       paginas_jpg.append(res.stdout)
     return img2pdf.convert(paginas_jpg)
-  except Exception:
+  except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
     return None
 
 
 def _preparar_word_para_pdf(doc: Path, alvo: Path, min_chars: int) -> tuple[dict, bytes | None, Path | None]:
-  vazio = lambda motivo: {"tem_texto": False, "chars": 0, "paginas_com_texto": 0, "dados": None, "conteudo_texto": "", "motivo": motivo}
+  def vazio(motivo: str) -> dict:
+    return {
+        "tem_texto": False,
+        "chars": 0,
+        "paginas_com_texto": 0,
+        "dados": None,
+        "conteudo_texto": "",
+        "motivo": motivo,
+    }
+
   if doc.suffix.lower() == ".doc":
     return vazio("formato_doc_nao_suportado"), None, None
   try:
@@ -186,13 +236,13 @@ def _preparar_word_para_pdf(doc: Path, alvo: Path, min_chars: int) -> tuple[dict
       return vazio("falha_xhtml2pdf"), None, None
     dados = buf.getvalue()
     chars, _, texto = _analisar_pdf(BytesIO(dados), min_chars)
-  except Exception as e:
+  except (OSError, ValueError, RuntimeError) as e:
     return vazio(f"falha_conversao_word ({type(e).__name__})"), None, None
   ok = chars >= min_chars
   info = vazio("convertido_via_mammoth_xhtml2pdf" if ok else "convertido_mas_sem_texto_selecionavel")
   info.update({"tem_texto": ok, "chars": chars, "conteudo_texto": texto, "_dados_sem_texto": lambda b=dados: _pdf_bytes_para_pdf_imagem_bytes(b), "_alvo_sem_texto": doc.with_name(f"{doc.stem}{SUFIXO_SEM_TEXTO}.pdf")})
   return info, dados, alvo
-
+  
 
 def _classificar_arquivo(caminho, idioma_ocr="por", min_chars=MIN_CHARS) -> tuple[dict, bytes | None, Path | None]:
   arq, ext = Path(caminho), Path(caminho).suffix.lower()
@@ -268,6 +318,7 @@ def processar_arquivo(caminho, idioma_ocr=IDIOMA_OCR, min_chars=MIN_CHARS) -> di
     return _confirmar_e_salvar(classificacao, None, None, confirmar=False)
 
   return _confirmar_e_salvar(classificacao, dados, alvo, confirmar=False)
+
 
 if __name__ == "__main__":
   print("Conversor de imagem para PDF com reconhecimento de texto")
