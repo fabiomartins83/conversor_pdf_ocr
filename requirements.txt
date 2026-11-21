@@ -1,6 +1,7 @@
 img2pdf
 mammoth
 ocrmypdf
+pdfplumber
 pillow
 pypdf
 xhtml2pdf

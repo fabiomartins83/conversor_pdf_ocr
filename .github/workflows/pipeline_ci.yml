@@ -54,4 +54,4 @@ jobs:
       - name: 10. Verificar sintaxe e importações
         run: |
           python -m py_compile pdf_ocr_converter.py
-          python -c "import img2pdf, mammoth, ocrmypdf, pypdf, xhtml2pdf; from PIL import Image; print('Dependencias instaladas com sucesso.')"
+          python -c "import img2pdf, mammoth, ocrmypdf, pdfplumber, pypdf, xhtml2pdf; from PIL import Image, ImageOps, UnidentifiedImageError; print('Dependencias instaladas com sucesso.')"
